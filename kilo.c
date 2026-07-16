@@ -27,11 +27,13 @@
  *      size and derive screenrows/screencols from the terminal cell
  *      size (CELL_W x CELL_H below). No live resize support.
  *
- *   4. FILES: OS1's open()/ftruncate() don't support O_CREAT/O_TRUNC
- *      (VFS limitation, see posix_types.h). editorOpen() now reads the
- *      whole file with fopen/fseek/fread and splits it into lines itself
- *      (no getline()). editorSave() now writes the whole buffer in one
- *      shot via file_write(), which is OS1's create-or-overwrite helper.
+ *   4. FILES: editorOpen() reads the whole file with fopen/fseek/fread and
+ *      splits it into lines itself (no getline()). editorSave() writes the
+ *      whole buffer in one shot via file_write(), OS1's create-or-overwrite
+ *      helper: a from-start write truncates the file to exactly the buffer
+ *      length on the FS side (ext4_write), so shortening a file saves
+ *      correctly. (open() supports O_CREAT/O_TRUNC now too, but the
+ *      whole-file write is simpler here.)
  *
  *   5. MISC: no termios, no signal(), no errno/strerror/perror, no
  *      ctype.h, no time(). Tiny local shims are provided below.
@@ -791,6 +793,8 @@ static int editorOpen(char *filename) {
   free(E.filename);
   size_t fnlen = strlen(filename) + 1;
   E.filename = malloc(fnlen);
+  if (!E.filename)
+    return 1; /* OOM on the filename copy: cannot proceed */
   memcpy(E.filename, filename, fnlen);
 
   fp = fopen(filename, "r");
@@ -815,6 +819,12 @@ static int editorOpen(char *filename) {
 
   if (fsize > 0) {
     data = malloc((size_t)fsize + 1);
+    if (!data) {
+      /* OOM on a large file: don't fread() into NULL — bail out cleanly and
+       * start with an empty buffer instead of crashing. */
+      fclose(fp);
+      return 1;
+    }
     size_t got = fread(data, 1, (size_t)fsize, fp);
     data[got] = '\0';
     fsize = (long)got;
@@ -850,13 +860,17 @@ static int editorOpen(char *filename) {
 
 /* Save the current file on disk. Return 0 on success, 1 on error.
  *
- * OS1 NOTE: upstream used open(O_CREAT)+ftruncate()+write(). OS1's VFS
- * doesn't support O_CREAT/O_TRUNC (see posix_types.h), so we instead use
- * file_write(path, buf, size, offset), which creates-or-overwrites the
- * whole file in a single call (#251 in syscall_nums.h). */
+ * OS1 NOTE: upstream used open(O_CREAT)+ftruncate()+write().  This port uses
+ * file_write(path, buf, len, 0): a from-start write now BOTH creates the file
+ * and truncates it to exactly 'len' bytes on the FS side (ext4_write), so a
+ * shortened save no longer leaves the old tail behind — one call does the
+ * whole create-or-overwrite.  (open(O_CREAT|O_TRUNC) is kernel-supported now
+ * too, but the positional whole-file write is simpler here.) */
 static int editorSave(void) {
   int len;
   char *buf = editorRowsToString(&len);
+  if (!buf)
+    return 1; /* OOM assembling the buffer: nothing safe to write */
 
   int written = file_write(E.filename, buf, len, 0);
   free(buf);
@@ -1377,9 +1391,8 @@ int main(int argc, char **argv) {
  *   WIN_H. If OS1 windows can be resized by the user, editorRefreshScreen()
  *   will keep using the original WIN_COLS x WIN_ROWS grid regardless.
  *
- * - file_write() is assumed to create the file if it does not exist and to
- *   truncate it to exactly `len` bytes (matching the old open+ftruncate+
- *   write sequence). If the underlying VFS instead *appends* or does not
- *   truncate on overwrite, editorSave() will need a delete-then-write or an
- *   explicit truncate step once such a syscall exists.
+ * - file_write() creates the file if missing and, for a from-start (offset 0)
+ *   write, truncates it to exactly `len` bytes — the FS-side ext4_write does
+ *   the truncation now, so editorSave()'s single whole-file write is correct
+ *   even when the buffer shrinks (no delete-then-write / ftruncate needed).
  */
