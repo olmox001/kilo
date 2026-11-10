@@ -1016,7 +1016,7 @@ static void editorRefreshScreen(void) {
   /* Second row depends on E.statusmsg and the status message update time. */
   abAppend(&ab, "\x1b[0K", 4);
   int msglen = strlen(E.statusmsg);
-  if (msglen && get_time() - E.statusmsg_time < 5000)
+  if (msglen && OS1_time_now() - E.statusmsg_time < 5000)
     abAppend(&ab, E.statusmsg, msglen <= E.screencols ? msglen : E.screencols);
 
   /* Put cursor at its current position. Note that the horizontal position
@@ -1050,7 +1050,7 @@ static void editorSetStatusMessage(const char *fmt, ...) {
   va_start(ap, fmt);
   vsnprintf(E.statusmsg, sizeof(E.statusmsg), fmt, ap);
   va_end(ap);
-  E.statusmsg_time = get_time();
+  E.statusmsg_time = OS1_time_now();
 }
 
 /* =============================== Find mode ================================ */
